@@ -42,7 +42,8 @@ def _request(
             ),
             prompt_input_embeds=torch.arange(16, dtype=torch.float32).reshape(4, 4)
             + offset,
-            # The last sampled token may not have been a decode input yet.
+            # Deliberately incomplete: recovery must use req.output_ids,
+            # not the separate output_codes collected for downstream audio.
             output_codes=[torch.tensor([token]) for token in output_ids[:-1]],
             stream_code_seen=8,
             stream_prompt_sent=True,
@@ -51,6 +52,8 @@ def _request(
 
 
 def _batch(*requests: SimpleNamespace) -> SimpleNamespace:
+    # prepare_for_extend slices get_fill_ids()[len(req.prefix_indices):];
+    # its length invariant makes the endpoint prefix + extend_range.length.
     ids = []
     for request in requests:
         req = request.data.req
@@ -84,6 +87,7 @@ def test_prefill_reconstructs_the_requested_interval(
     request = _request(prefix, extend, output_ids)
     batch = _batch(request)
     prompt = request.data.prompt_input_embeds.to(dtype=dtype)
+    # FunCosyVoice3SGLangModel.forward uses speech_embedding for decode inputs.
     speech = runner.model.speech_embedding(torch.tensor(output_ids, dtype=torch.long))
     expected = torch.cat([prompt, speech])[prefix : prefix + extend]
 
