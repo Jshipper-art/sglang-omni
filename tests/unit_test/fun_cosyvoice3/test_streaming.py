@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from queue import Empty, Queue
 from types import SimpleNamespace
 
@@ -506,15 +505,19 @@ def test_late_payloads_share_one_causal_flow_batch() -> None:
     assert [message.type for message in messages] == ["stream", "stream"]
 
 
-def test_c1_first_hop_does_not_wait_for_peers() -> None:
+def test_c1_first_hop_does_not_wait_for_peers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "sglang_omni.models.fun_cosyvoice3.streaming_vocoder.time",
+        SimpleNamespace(
+            monotonic=lambda: pytest.fail("a lone request entered the peer-wait window")
+        ),
+    )
     flow, scheduler = _scheduler()
     scheduler._on_streaming_new_request("req-a", _stream_payload("req-a"))
     scheduler._ingest_stream_item("req-a", _item(list(range(28))))
-    started = time.monotonic()
     with scheduler._state_lock:
         failed = scheduler._pump_streams()
     assert failed == []
-    assert time.monotonic() - started < 0.05
     assert len(flow.calls) == 1
 
 
@@ -636,7 +639,15 @@ def test_mixed_prompt_follow_ups_share_one_causal_flow_batch() -> None:
     assert follow_calls[0]["x"].shape[0] == 4
 
 
-def test_c1_follow_up_stays_native_and_does_not_wait() -> None:
+def test_c1_follow_up_stays_native_and_does_not_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "sglang_omni.models.fun_cosyvoice3.streaming_vocoder.time",
+        SimpleNamespace(
+            monotonic=lambda: pytest.fail("a lone request entered the peer-wait window")
+        ),
+    )
     flow, scheduler = _scheduler()
     scheduler._on_streaming_new_request("req-a", _stream_payload("req-a"))
     scheduler._ingest_stream_item("req-a", _item(list(range(28))))
@@ -644,11 +655,9 @@ def test_c1_follow_up_stays_native_and_does_not_wait() -> None:
         failed = scheduler._pump_streams()
     assert failed == []
     scheduler._ingest_stream_item("req-a", _item(list(range(28, 78))))
-    started = time.monotonic()
     with scheduler._state_lock:
         failed = scheduler._pump_streams()
     assert failed == []
-    assert time.monotonic() - started < 0.05
     assert len(flow.calls) == 2
     assert int(flow.calls[1]["token"].shape[1]) == 78
 
