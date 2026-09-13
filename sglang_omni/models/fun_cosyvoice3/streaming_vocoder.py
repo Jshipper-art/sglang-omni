@@ -692,7 +692,7 @@ class FunCosyVoice3StreamingVocoderScheduler(
                     "Fun-CosyVoice3 causal Flow batch returned "
                     f"{mel.shape[-1]} frames, need offset {offset_frames}"
                 )
-            delta, hift_mel, speech_offset = self._vocoder._hift_delta(
+            delta, hift_mel, speech_offset = self._vocoder.hift_delta(
                 mel[:, :, offset_frames:],
                 hift_mel=state.hift_mel,
                 speech_offset=state.speech_offset,
