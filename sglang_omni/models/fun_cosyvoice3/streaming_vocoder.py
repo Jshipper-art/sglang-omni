@@ -190,6 +190,44 @@ class FunCosyVoice3StreamingVocoderScheduler(
         for failed_id in failed:
             self._cleanup_aborted_request(failed_id)
 
+    def _get_peer_message(
+        self, *, timeout: float = 0.0, allow_payload_registration: bool = False
+    ) -> IncomingMessage:
+        """Read peers while keeping stream chunks and done ordered."""
+        try:
+            incoming = self.inbox.get_nowait()
+        except _queue_mod.Empty:
+            return self._get_batch_message(timeout=timeout)
+        if allow_payload_registration and incoming.type == "new_request":
+            request_id = incoming.request_id
+            state = self._stream_states.get(request_id)
+            if (
+                state is not None
+                and state.prompts_latched
+                and state.tokens
+                and request_id not in self._pending_done
+                and request_id not in self._stream_payloads
+                and request_id not in self._completed_stream_request_ids
+                and not self._is_aborted(request_id)
+                and not any(
+                    msg.request_id == request_id and msg.type == "new_request"
+                    for msg in self._pending_messages
+                )
+            ):
+                try:
+                    # Registering the first payload does not consume audio or
+                    # finish the request until its done is actually dispatched.
+                    if self.is_streaming_payload(incoming.data):
+                        return incoming
+                except Exception:
+                    pass
+        for index, older in enumerate(self._pending_messages):
+            if older.request_id == incoming.request_id:
+                del self._pending_messages[index]
+                self._pending_messages.append(incoming)
+                return older
+        return incoming
+
     def _collect_new_request_batch(
         self, first_msg: IncomingMessage
     ) -> list[IncomingMessage]:
@@ -206,7 +244,7 @@ class FunCosyVoice3StreamingVocoderScheduler(
         cap = max(int(self._max_batch_size), 1)
         while len(batch) < cap:
             try:
-                msg = self._get_batch_message()
+                msg = self._get_peer_message()
             except _queue_mod.Empty:
                 break
             if self._is_aborted(msg.request_id):
@@ -266,7 +304,7 @@ class FunCosyVoice3StreamingVocoderScheduler(
         cap = self._stream_chunk_batch_max or max(self._max_batch_size, 1)
         while len(batch) < cap:
             try:
-                msg = self._get_batch_message()
+                msg = self._get_peer_message()
             except _queue_mod.Empty:
                 break
             if msg.type != "stream_chunk":
@@ -358,12 +396,9 @@ class FunCosyVoice3StreamingVocoderScheduler(
                 return
             remaining = deadline - time.monotonic()
             try:
-                if self._pending_messages:
-                    msg = self._pending_messages.popleft()
-                elif remaining <= 0:
-                    msg = self.inbox.get_nowait()
-                else:
-                    msg = self.inbox.get(timeout=remaining)
+                msg = self._get_peer_message(
+                    timeout=max(remaining, 0.0), allow_payload_registration=True
+                )
             except _queue_mod.Empty:
                 if remaining <= 0:
                     return
@@ -426,12 +461,9 @@ class FunCosyVoice3StreamingVocoderScheduler(
                 return
             remaining = deadline - time.monotonic()
             try:
-                if self._pending_messages:
-                    msg = self._pending_messages.popleft()
-                elif remaining <= 0:
-                    msg = self.inbox.get_nowait()
-                else:
-                    msg = self.inbox.get(timeout=remaining)
+                msg = self._get_peer_message(
+                    timeout=max(remaining, 0.0), allow_payload_registration=True
+                )
             except _queue_mod.Empty:
                 if remaining <= 0:
                     return
@@ -440,20 +472,11 @@ class FunCosyVoice3StreamingVocoderScheduler(
                 return
 
     def _ingest_ready_inbox(self) -> None:
-        """Pull already-queued peers between hops without blocking.
-
-        The base pump drains every ready hop before returning to the
-        serving loop. CosyVoice first hops must be able to join after a
-        follow-up step, otherwise a backlogged request monopolizes the GPU.
-        """
-        while True:
+        """Admit queued peers between hops without chasing new arrivals."""
+        scan_budget = len(self._pending_messages) + self.inbox.qsize()
+        for _ in range(scan_budget):
             try:
-                # The collector may have pushed back an older
-                # chunk or done marker. Consume it before newer inbox messages.
-                if self._pending_messages:
-                    msg = self._pending_messages.popleft()
-                else:
-                    msg = self.inbox.get_nowait()
+                msg = self._get_peer_message(allow_payload_registration=True)
             except _queue_mod.Empty:
                 return
             if not self._ingest_peer_message(msg):
